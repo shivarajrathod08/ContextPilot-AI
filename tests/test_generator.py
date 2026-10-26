@@ -383,7 +383,7 @@ class TestAIEngineFallbackAndSecurity:
         assert "gemini api invocation failed" in str(excinfo.value).lower()
 
     def test_api_key_redaction_utility(self):
-        fake_key = "AIzaSyDHPvXLm0RhApW102rGXfYRy4ieCinqPOI"
+        fake_key = "AIza" + "Sy" + "0" * 35
         dirty_msg = f"Error communicating with Gemini at https://example.com?key={fake_key}"
         clean_msg = _sanitize_string(dirty_msg, fake_key)
         assert fake_key not in clean_msg

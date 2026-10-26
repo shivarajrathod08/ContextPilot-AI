@@ -47,6 +47,7 @@ class TaskScope(str, Enum):
 
 class GenerationMode(str, Enum):
     RULE_BASED = "Rule-Based Deterministic Engine (Offline)"
+    LOCAL_OPEN_WEIGHT = "Open-Weight Local Model (Ollama)"
     AI_POWERED = "AI-Powered Engine (Gemini API)"
 
 
@@ -58,6 +59,15 @@ class BriefRequest:
     gemini_api_key: Optional[str] = None
     force_ai: bool = False
     repo_path: Optional[str] = None
+    engine: Optional[GenerationMode] = None
+    local_model: Optional[str] = None
+    local_base_url: Optional[str] = None
+
+    def resolve_engine(self) -> GenerationMode:
+        """Returns the explicitly selected engine, falling back to legacy flags."""
+        if self.engine is not None:
+            return self.engine
+        return GenerationMode.AI_POWERED if self.force_ai else GenerationMode.RULE_BASED
 
     def validate(self) -> List[str]:
         """Validates the input parameters. Returns list of error messages."""

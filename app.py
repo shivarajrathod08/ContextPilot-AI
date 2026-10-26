@@ -9,9 +9,12 @@ from datetime import datetime
 import os
 import re
 import streamlit as st
+import streamlit.components.v1 as components
 
 from core.ai_engine import is_ai_available
+from core.alan_voice import build_embed_html, get_project_key
 from core.generator import generate_brief
+from core.openweight_engine import DEFAULT_BASE_URL, get_local_config, is_local_llm_available
 from core.models import (
     BriefRequest,
     GenerationMode,
@@ -19,6 +22,38 @@ from core.models import (
     ProjectType,
     TaskScope,
 )
+
+
+def render_embedded_html(html: str, height: int) -> None:
+    """Renders HTML in a sandboxed iframe across Streamlit versions.
+
+    `st.iframe` replaces `st.components.v1.html` in newer Streamlit releases;
+    the fallback keeps the app working on the minimum supported version.
+    """
+    if hasattr(st, "iframe"):
+        st.iframe(html, height=height)
+    else:
+        components.html(html, height=height)
+
+
+# State owned by the current brief; the Clear callback removes all of it.
+BRIEF_STATE_KEYS = ("last_brief", "last_warnings", "generation_success")
+CHECKLIST_KEY_PREFIXES = ("ac_check_", "test_", "step_")
+
+
+def clear_workspace() -> None:
+    """Resets the task input, generated brief, checklists, and error state.
+
+    Runs as a button callback, so widget values can be reset safely before the
+    next script run re-instantiates the widgets.
+    """
+    st.session_state["current_task_text"] = ""
+    for key in BRIEF_STATE_KEYS:
+        st.session_state.pop(key, None)
+    for key in list(st.session_state.keys()):
+        if key.startswith(CHECKLIST_KEY_PREFIXES):
+            del st.session_state[key]
+
 
 # Page Configuration
 st.set_page_config(
@@ -58,6 +93,16 @@ st.markdown(
         font-weight: 600;
         display: inline-block;
         border: 1px solid #a855f7;
+    }
+    .badge-local {
+        background-color: #064e3b;
+        color: #34d399;
+        padding: 5px 12px;
+        border-radius: 12px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        display: inline-block;
+        border: 1px solid #10b981;
     }
     .badge-repo-synthetic {
         background-color: #3b2a0c;
@@ -234,18 +279,53 @@ with st.sidebar:
         "Select Engine Mode",
         options=[
             "Rule-Based Deterministic Engine (Offline / Fast)",
+            "Open-Weight Local Model (Ollama)",
             "AI-Powered Engine (Gemini API)",
         ],
         index=0,
         help=(
             "Rule-Based engine generates task-specific briefs instantly without any network or API keys. "
+            "Open-Weight engine calls a local Ollama model with open weights. "
             "AI-Powered engine calls Google Gemini for generative brief synthesis."
         ),
     )
-    use_ai = "AI-Powered" in engine_choice
+    use_local = "Open-Weight" in engine_choice
+    use_ai = "Gemini" in engine_choice
+    if use_local:
+        engine_mode = GenerationMode.LOCAL_OPEN_WEIGHT
+    elif use_ai:
+        engine_mode = GenerationMode.AI_POWERED
+    else:
+        engine_mode = GenerationMode.RULE_BASED
 
+    local_base_url = ""
+    local_model = ""
     user_api_key = ""
-    if use_ai:
+    if use_local:
+        try:
+            default_local_base, default_local_model = get_local_config()
+        except ValueError:
+            default_local_base, default_local_model = DEFAULT_BASE_URL, ""
+
+        local_model = st.text_input(
+            "Open-Weight Model",
+            value=default_local_model,
+            placeholder="e.g. qwen2.5:7b-instruct",
+            help="Any model you have pulled into Ollama. No default model is assumed.",
+        )
+        local_base_url = st.text_input(
+            "Ollama Base URL",
+            value=default_local_base,
+            help="Where the local Ollama runtime is listening. Defaults to OLLAMA_BASE_URL or http://localhost:11434.",
+        )
+        if st.button("🔌 Test Ollama Connection", use_container_width=True):
+            is_ready, ready_message = is_local_llm_available(local_base_url, local_model)
+            if is_ready:
+                st.success(f"✅ {ready_message}")
+            else:
+                st.warning(f"⚠️ {ready_message}")
+        st.caption("Requires Ollama running locally: `ollama serve` then `ollama pull <model>`.")
+    elif use_ai:
         env_key_available, _ = is_ai_available()
         default_hint = "GEMINI_API_KEY detected in environment" if env_key_available else "Enter AIzaSy... or set GEMINI_API_KEY"
         user_api_key = st.text_input(
@@ -260,6 +340,20 @@ with st.sidebar:
             st.warning("⚠️ An API key is required for AI mode. Provide one above or switch to Rule-Based engine.")
     else:
         st.info("⚡ **Rule-Based Engine Active**: 100% offline, zero latency, no API keys required.")
+
+    if get_project_key():
+        st.markdown("---")
+        st.markdown("### 🎙️ Alan AI Voice")
+        try:
+            alan_html = build_embed_html()
+        except ValueError as alan_err:
+            st.warning(f"⚠️ {alan_err}")
+        else:
+            render_embedded_html(alan_html, height=150)
+            st.caption(
+                "Ask Alan for a brief, then confirm. Your Alan AI Studio script sends a "
+                "`prefillTask` command to fill the task box."
+            )
 
     st.markdown("---")
     st.caption("ContextPilot AI • OpenFire Hackathon Edition")
@@ -276,21 +370,35 @@ with col_mode:
     st.write("")
     if use_ai:
         st.markdown('<div style="text-align:right;"><span class="badge-ai">MODE: GEMINI AI</span></div>', unsafe_allow_html=True)
+    elif use_local:
+        st.markdown('<div style="text-align:right;"><span class="badge-local">MODE: LOCAL OPEN-WEIGHT</span></div>', unsafe_allow_html=True)
     else:
         st.markdown('<div style="text-align:right;"><span class="badge-rule">MODE: DETERMINISTIC</span></div>', unsafe_allow_html=True)
 
-# Determine initial task text
-if "task_input" not in st.session_state:
-    st.session_state["task_input"] = ""
+# Task text lives in the text area's own widget key so there is one source of truth.
+if "current_task_text" not in st.session_state:
+    st.session_state["current_task_text"] = ""
 
-if sample_choice != "None" and SAMPLE_TASKS[sample_choice]["text"]:
-    st.session_state["task_input"] = SAMPLE_TASKS[sample_choice]["text"]
+# Apply a preset only when the selection changes; otherwise a cleared or edited
+# task would be silently overwritten on every rerun.
+previous_preset = st.session_state.get("preset_choice", "None")
+if sample_choice != previous_preset:
+    st.session_state["preset_choice"] = sample_choice
+    if SAMPLE_TASKS[sample_choice]["text"]:
+        st.session_state["current_task_text"] = SAMPLE_TASKS[sample_choice]["text"]
+
+# Alan AI voice handoff: the voice agent navigates to /?task=<urlencoded text>
+voice_task = st.query_params.get("task")
+if isinstance(voice_task, list):
+    voice_task = voice_task[0] if voice_task else None
+if voice_task:
+    st.session_state["current_task_text"] = voice_task
+    st.query_params.clear()
 
 # Text area for software task
 st.markdown("### 📝 Enter Software Task / Feature Request")
 user_task = st.text_area(
     label="Describe what needs to be implemented or fixed:",
-    value=st.session_state["task_input"],
     height=130,
     placeholder=(
         "Example: Fix Spring Boot login bug where users receive HTTP 500. "
@@ -304,9 +412,7 @@ col_actions, col_clear, col_space = st.columns([2, 1, 3])
 with col_actions:
     generate_clicked = st.button("🚀 Generate Implementation Brief", type="primary", use_container_width=True)
 with col_clear:
-    if st.button("🧹 Clear", use_container_width=True):
-        st.session_state["task_input"] = ""
-        st.rerun()
+    st.button("🧹 Clear", use_container_width=True, on_click=clear_workspace)
 
 # Generation Logic & Error Handling
 if generate_clicked:
@@ -326,9 +432,17 @@ if generate_clicked:
             gemini_api_key=user_api_key.strip() if user_api_key else None,
             force_ai=use_ai,
             repo_path=repo_path_input.strip() if repo_path_input else None,
+            engine=engine_mode,
+            local_model=local_model.strip() or None,
+            local_base_url=local_base_url.strip() or None,
         )
 
-        spinner_text = "🧠 Synthesizing implementation brief via Gemini AI..." if use_ai else "⚡ Generating task-specific implementation brief via Rule Engine..."
+        if use_ai:
+            spinner_text = "🧠 Synthesizing implementation brief via Gemini AI..."
+        elif use_local:
+            spinner_text = "🧠 Synthesizing implementation brief via the local open-weight model..."
+        else:
+            spinner_text = "⚡ Generating task-specific implementation brief via Rule Engine..."
         with st.spinner(spinner_text):
             try:
                 brief, warnings = generate_brief(request)
@@ -342,6 +456,8 @@ if generate_clicked:
                 st.error(f"❌ **Generation Error**: {run_err}")
                 if use_ai:
                     st.info("💡 You can switch to the 'Rule-Based Deterministic Engine' in the sidebar to generate the brief offline without an API key.")
+                elif use_local:
+                    st.info("💡 Check that Ollama is running (`ollama serve`) and the model is pulled (`ollama pull <model>`), or switch to the Rule-Based engine.")
                 st.session_state["generation_success"] = False
             except Exception as e:
                 st.error(f"❌ **Unexpected Error**: {e}")
@@ -360,7 +476,13 @@ if st.session_state.get("generation_success") and "last_brief" in st.session_sta
     # Metrics Bar
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric("Engine Mode", "Gemini AI" if brief.mode_used == GenerationMode.AI_POWERED else "Deterministic")
+        if brief.mode_used == GenerationMode.AI_POWERED:
+            engine_label = "Gemini AI"
+        elif brief.mode_used == GenerationMode.LOCAL_OPEN_WEIGHT:
+            engine_label = "Local Open-Weight"
+        else:
+            engine_label = "Deterministic"
+        st.metric("Engine Mode", engine_label)
     with m2:
         st.metric("Project Stack", brief.project_type.name.replace("_", " "))
     with m3:
@@ -372,6 +494,8 @@ if st.session_state.get("generation_success") and "last_brief" in st.session_sta
     # Attribution & Transparency Notice
     if brief.mode_used == GenerationMode.AI_POWERED:
         st.info("🤖 **Engine Mode**: Generated dynamically using **Google Gemini AI**.")
+    elif brief.mode_used == GenerationMode.LOCAL_OPEN_WEIGHT:
+        st.info("🟢 **Engine Mode**: Generated dynamically using a **local open-weight model** served by Ollama.")
     else:
         st.info("⚡ **Engine Mode**: Generated deterministically using ContextPilot's **Rule-Based Engine** (Offline & Instant).")
 

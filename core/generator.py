@@ -4,10 +4,12 @@ Coordinates input validation, stack detection & conflict resolution,
 deterministic generation, and optional AI model generation.
 """
 
+from dataclasses import replace
 from typing import List, Tuple
 from core.ai_engine import generate_ai_brief, is_ai_available
 from core.deterministic_engine import generate_deterministic_brief, detect_technology_stack
 from core.models import BriefRequest, GenerationMode, ImplementationBrief, ProjectType
+from core.openweight_engine import generate_local_brief, is_local_llm_available
 
 
 def generate_brief(request: BriefRequest) -> Tuple[ImplementationBrief, List[str]]:
@@ -20,7 +22,7 @@ def generate_brief(request: BriefRequest) -> Tuple[ImplementationBrief, List[str
         (ImplementationBrief, warnings_list)
 
     Raises:
-        ValueError: If input validation fails.
+        ValueError: If input validation fails or the selected engine is not ready.
         RuntimeError: If explicit AI mode was requested but failed.
     """
     errors = request.validate()
@@ -41,21 +43,27 @@ def generate_brief(request: BriefRequest) -> Tuple[ImplementationBrief, List[str
         )
         warnings.append(conflict_warning)
         # Adapt effective project type so an explicitly stated stack is always honored
-        effective_request = BriefRequest(
-            task_description=request.task_description,
-            project_type=detected_stack,
-            task_scope=request.task_scope,
-            gemini_api_key=request.gemini_api_key,
-            force_ai=request.force_ai,
-            repo_path=request.repo_path,
-        )
+        effective_request = replace(request, project_type=detected_stack)
 
-    has_key, key_msg = is_ai_available(request.gemini_api_key)
+    engine = request.resolve_engine()
 
-    if request.force_ai:
+    if engine == GenerationMode.AI_POWERED:
+        has_key, key_msg = is_ai_available(request.gemini_api_key)
         if not has_key:
             raise ValueError(f"AI generation requested, but no valid Gemini API key is configured. ({key_msg})")
         brief = generate_ai_brief(effective_request)
+        brief.detected_project_type = detected_stack
+        brief.stack_conflict_warning = conflict_warning
+        return brief, warnings
+
+    if engine == GenerationMode.LOCAL_OPEN_WEIGHT:
+        is_ready, ready_msg = is_local_llm_available(
+            effective_request.local_base_url,
+            effective_request.local_model,
+        )
+        if not is_ready:
+            raise RuntimeError(f"Open-weight generation requested, but the local model is not ready. ({ready_msg})")
+        brief = generate_local_brief(effective_request)
         brief.detected_project_type = detected_stack
         brief.stack_conflict_warning = conflict_warning
         return brief, warnings

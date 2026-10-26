@@ -34,11 +34,17 @@
    - **Guaranteed Honesty**: ContextPilot explicitly marks when file paths are **Synthesized Blueprints** rather than claiming to have scanned a local repository.
    - **Optional Local Repo Inspection**: Supply your local project path (e.g., `C:\workspace\my-app`) to compare proposed architecture against existing files on disk, clearly distinguishing existing components from newly proposed files.
 
-4. **Dual Generation Engines**:
+4. **Three Generation Engines**:
    - ⚡ **Rule-Based Deterministic Engine (Offline / Default)**: Instant, zero-latency generation requiring **no API keys** or network access. Ideal for air-gapped environments, rapid hackathon prototyping, and privacy.
+   - 🟢 **Open-Weight Local Model (Ollama)**: Runs an open-weight model on your own machine through Ollama's local HTTP API. No API key, no vendor account, and no additional Python package.
    - 🤖 **AI-Powered Engine (Google Gemini)**: Deep generative synthesis leveraging Google Gemini models (`gemini-2.5-flash` / `gemini-2.0-flash`). Secure key handling with automatic redaction from logs and error messages.
 
-5. **Interactive Developer Interface**:
+5. **Optional Alan AI Voice Control**:
+   - Embeds the Alan AI Web SDK (`@alan-ai/alan-sdk-web`) in the sidebar when `ALAN_PROJECT_KEY` is set.
+   - A Studio dialog script sends a `prefillTask` command, and the spoken task is handed to the Python app through a URL query parameter.
+   - Stays completely inert when no key is configured.
+
+6. **Interactive Developer Interface**:
    - Sleek dark-mode aesthetic with monospace typography.
    - Preset task selector for quick evaluation across Python, Java/Spring Boot, React, and Flutter.
    - Interactive checklist trackers for execution steps and acceptance criteria (`[AC-1]`, `[AC-2]`).
@@ -134,9 +140,56 @@ ContextPilot explicitly reports the provenance of all proposed file paths:
 
 ---
 
+## 🟢 Mode 3: Open-Weight Local Model (Ollama)
+
+Runs a generative model with open weights on your own hardware. No API key and no data leaves the machine.
+
+1. Install [Ollama](https://ollama.com/download) for your platform.
+2. Start the runtime and pull a model:
+   ```powershell
+   ollama serve
+   ollama pull qwen2.5:7b-instruct
+   ```
+   Any pulled model works; ContextPilot does not assume a specific one. Prefer Apache-2.0 weights (Qwen, Mistral) if licensing matters.
+3. Set the runtime location and model, or enter them in the sidebar:
+   ```powershell
+   $env:OLLAMA_BASE_URL="http://localhost:11434"
+   $env:OLLAMA_MODEL="qwen2.5:7b-instruct"
+   ```
+4. Select **Open-Weight Local Model (Ollama)** in the sidebar and click **Generate**.
+
+The sidebar reports whether Ollama is reachable and whether the model is pulled. If the server is down or the model is missing, ContextPilot explains the fix (`ollama serve` / `ollama pull <model>`) and leaves the deterministic engine available.
+
+> **Deployment note**: `http://localhost:11434` only works when Ollama runs on the same machine as Streamlit. For containers or Streamlit Community Cloud, point `OLLAMA_BASE_URL` at a reachable host — a Cloud app cannot reach your laptop's Ollama.
+
+---
+
+## 🎙️ Optional: Alan AI Voice Control
+
+ContextPilot can take a task by voice using the **Alan AI Web SDK** (Alan AI has no Python SDK; the voice agent runs in the browser). The embed is skipped entirely unless `ALAN_PROJECT_KEY` is set.
+
+1. Create a project in [Alan AI Studio](https://studio.alan.app/register) and copy its key.
+2. Add a dialog script that forwards the task to the app:
+   ```javascript
+   intent('draft a brief for $(TASK)', (p) => {
+     play({ command: 'prefillTask', task: p.TASK.value });
+   });
+   ```
+3. Configure and restart the app:
+   ```powershell
+   $env:ALAN_PROJECT_KEY="your-alan-project-key"
+   streamlit run app.py
+   ```
+
+The voice agent then fills the task box, and the current engine (rule-based, local, or Gemini) generates the brief. The project key is a public client identifier, not a secret, but it is still read from configuration and never hardcoded.
+
+> **Caveats**: the SDK loads from `studio.alan.app`, so the browser needs network access; microphone capture requires a secure context (localhost or HTTPS); and the voice handoff reloads the page with `?task=...`, so the previously rendered brief is cleared.
+
+---
+
 ## 🧪 Running Automated Tests
 
-ContextPilot includes 25 automated tests verifying validation, task-specific generation, stack conflict resolution, repository honesty, and API security.
+ContextPilot includes 56 automated tests verifying validation, task-specific generation, stack conflict resolution, repository honesty, API security, the local open-weight engine, the optional Alan AI embed, and Clear/session-state behaviour.
 
 Run the test suite with pytest:
 ```powershell
@@ -153,6 +206,9 @@ Run the test suite with pytest:
 - **Honesty & Provenance**: Asserts that unconnected briefs explicitly declare no repository was scanned.
 - **Connected Inspection**: Asserts that files found on disk are properly tagged with `[✓ Exists in local repository]`.
 - **Security & Redaction**: Asserts that API keys are stripped from error strings and never leaked.
+- **Open-Weight Engine**: Asserts config resolution, unreachable-server and missing-model messages, 404 handling, and that the default request still uses the rule-based engine.
+- **Alan AI Embed**: Asserts the embed stays inert without a key, rejects malformed keys, and loads the SDK only when configured.
+- **Clear & Session State**: Asserts Clear resets the task, generated brief, acceptance/QA checkboxes, and error state; that a selected preset cannot resurrect cleared text; and that all three engines stay selectable.
 
 ---
 
@@ -193,15 +249,23 @@ ContextPilot/
 │   ├── models.py              # BriefRequest, ImplementationBrief, enums & Markdown renderer
 │   ├── generator.py           # Engine orchestrator, stack detector, & conflict resolver
 │   ├── deterministic_engine.py# Task-specific domain classifier and repo inspector
-│   └── ai_engine.py           # Gemini API integration with key redaction & fallback
+│   ├── ai_common.py           # Shared prompt contract, sanitization & brief assembly
+│   ├── ai_engine.py           # Gemini API integration with key redaction & fallback
+│   ├── openweight_engine.py   # Local open-weight models via Ollama's HTTP API
+│   └── alan_voice.py          # Optional Alan AI Web SDK embed & voice handoff
 ├── tests/
 │   ├── __init__.py
-│   └── test_generator.py      # Comprehensive pytest test suite (25 tests)
+│   ├── test_generator.py      # Core engine, validation & security tests
+│   ├── test_openweight_engine.py  # Local model config, probing & generation tests
+│   ├── test_alan_voice.py     # Alan AI embed configuration tests
+│   └── test_app_clear.py      # Clear button & session-state regression tests
 ├── .env.example               # Template environment configuration
 ├── .gitignore                 # Python, venv, secrets, and IDE exclusions
 ├── requirements.txt           # Production dependencies
 └── README.md                  # Comprehensive setup and deployment documentation
 ```
+
+> **Configuration**: ContextPilot reads settings from environment variables. It does not load `.env` automatically, so export the variables in your shell or configure them in your deployment secrets. See `.env.example` for all options.
 
 ---
 
